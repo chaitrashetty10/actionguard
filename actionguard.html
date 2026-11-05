@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ActionGuard: permissioned AI actions with approvals and audit log</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#16181d;--mute:#5d6470;--line:#dfe2e8;--acc:#3b5bdb;--ok:#1f8a4c;--warn:#b7791f;--bad:#c92a2a;--chip:#eef1f6;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#101216;--card:#181b21;--ink:#eceef2;--mute:#9aa1ad;--line:#2b303a;--acc:#7c93ff;--ok:#4cc57e;--warn:#e0a84a;--bad:#ff7b7b;--chip:#21252d}}
+:root[data-theme="dark"]{--bg:#101216;--card:#181b21;--ink:#eceef2;--mute:#9aa1ad;--line:#2b303a;--acc:#7c93ff;--ok:#4cc57e;--warn:#e0a84a;--bad:#ff7b7b;--chip:#21252d}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0}h2{font-size:14px;margin:0 0 8px;text-transform:uppercase;letter-spacing:.04em;color:var(--mute)}
+.sub{color:var(--mute);margin:2px 0 14px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin-bottom:12px}
+select,input,button{font:inherit;color:var(--ink)}
+select,input{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px}
+input{width:100%}
+button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer}
+button.ghost{background:var(--chip);color:var(--ink)}button.bad{background:var(--bad)}button.ok{background:var(--ok)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.chips button{font-size:13px;padding:5px 10px}
+.msg{padding:8px 10px;border-radius:8px;margin:6px 0;background:var(--chip)}
+.msg.u{background:var(--acc);color:#fff}
+.tag{display:inline-block;border-radius:999px;padding:1px 9px;font-size:12px;border:1px solid var(--line);margin-right:4px}
+.auto{color:var(--ok)}.approve{color:var(--warn)}.deny{color:var(--bad)}
+.plan{border:1px dashed var(--line);border-radius:10px;padding:10px;margin-top:8px}
+code{background:var(--chip);padding:1px 6px;border-radius:5px;font-size:13px;overflow-wrap:anywhere}
+.log{border-top:1px solid var(--line);padding:8px 0;font-size:13px}
+.log:first-child{border-top:0}
+.scroll{max-height:340px;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+.note{font-size:12px;color:var(--mute)}
+</style>
+</head>
+<body>
+<main>
+<h1>ActionGuard</h1>
+<p class="sub">An AI assistant with tool access governed by role permissions, human approval for risky actions, and a full audit trail. The assistant here is a simulated rule-based planner, so the focus is the control layer.</p>
+
+<div class="card row">
+  <label for="role"><b>Acting as</b></label>
+  <select id="role"><option value="admin">Admin</option><option value="manager">Manager</option><option value="agent">Agent</option></select>
+  <span class="note" id="rolenote"></span>
+</div>
+
+<div class="grid">
+<div>
+  <div class="card">
+    <h2>Ask the assistant</h2>
+    <div class="row chips" id="chips"></div>
+    <div id="chat" class="scroll" style="max-height:220px;margin:8px 0"></div>
+    <div class="row"><input id="q" placeholder="e.g. Email Priya a renewal reminder" aria-label="Prompt"><button id="go">Send</button></div>
+    <div id="plan"></div>
+  </div>
+  <div class="card">
+    <h2>Policy matrix</h2>
+    <table id="matrix"></table>
+    <p class="note">Auto = runs immediately. Approve = needs a human click. Deny = blocked and logged. Permissions are re-checked at execution time, not only at planning time.</p>
+  </div>
+</div>
+<div>
+  <div class="card">
+    <h2>Audit log</h2>
+    <div id="log" class="scroll"></div>
+  </div>
+  <div class="card">
+    <h2>Workspace data</h2>
+    <table id="data"></table>
+  </div>
+</div>
+</div>
+</main>
+<script>
+var POLICY={
+ lookup_contact:{risk:"Read",admin:"auto",manager:"auto",agent:"auto",undo:false},
+ send_email:{risk:"External communication",admin:"approve",manager:"approve",agent:"deny",undo:false},
+ bulk_tag:{risk:"Bulk change",admin:"approve",manager:"approve",agent:"deny",undo:true},
+ delete_contact:{risk:"Destructive",admin:"approve",manager:"deny",agent:"deny",undo:true},
+ issue_refund:{risk:"Financial",admin:"approve",manager:"deny",agent:"deny",undo:false}
+};
+var contacts=[{name:"Priya Nair",email:"priya@acme.io",tags:["lead"]},{name:"Marco Silva",email:"marco@brightco.com",tags:["customer"]},{name:"Aisha Khan",email:"aisha@northwind.org",tags:["customer","vip"]},{name:"Tom Becker",email:"tom@lumen.dev",tags:["lead"]}];
+var log=[],pending=null,seq=0;
+var $=function(i){return document.getElementById(i)};
+function esc(s){return String(s).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
+function role(){return $("role").value}
+function decision(tool){return POLICY[tool][role()]}
+function find(t){return contacts.filter(function(c){return t.indexOf(c.name.split(" ")[0].toLowerCase())>-1})[0]}
+
+function plan(text){
+ var t=text.toLowerCase(),c=find(t),m;
+ if(/refund/.test(t)){m=t.match(/(\d+)/);return{tool:"issue_refund",args:{customer:c?c.name:"unspecified",amount_usd:m?+m[1]:0}}}
+ if(/delete|remove/.test(t)&&c)return{tool:"delete_contact",args:{contact:c.name}};
+ if(/tag/.test(t)){m=t.match(/(?:as|with)\s+([a-z-]+)\s*$/);return{tool:"bulk_tag",args:{scope:"all contacts",tag:m?m[1]:"campaign-q4"}}}
+ if(/email|send/.test(t)&&c)return{tool:"send_email",args:{to:c.email,subject:"Following up",body:"Draft generated from your request."}};
+ if(c&&/find|look|show|who|info|contact/.test(t))return{tool:"lookup_contact",args:{name:c.name}};
+ return null;
+}
+
+function run(p){
+ var res,undo=null,a=p.args,c;
+ if(p.tool==="lookup_contact"){c=find(a.name.toLowerCase());res=c.name+" | "+c.email+" | tags: "+c.tags.join(", ")}
+ if(p.tool==="send_email"){res="Email queued to "+a.to+" (cannot be recalled)"}
+ if(p.tool==="issue_refund"){res="Refund of $"+a.amount_usd+" issued to "+a.customer+" (cannot be reversed)"}
+ if(p.tool==="bulk_tag"){var prev=contacts.map(function(x){return x.tags.slice()});contacts.forEach(function(x){if(x.tags.indexOf(a.tag)<0)x.tags.push(a.tag)});res="Tag "+a.tag+" added to "+contacts.length+" contacts";undo=function(){contacts.forEach(function(x,i){x.tags=prev[i]})}}
+ if(p.tool==="delete_contact"){var i=contacts.map(function(x){return x.name}).indexOf(a.contact),old=contacts.splice(i,1)[0];res="Deleted "+old.name;undo=function(){contacts.splice(i,0,old)}}
+ return{res:res,undo:undo};
+}
+
+function addLog(e){e.id=++seq;e.time=new Date().toLocaleTimeString();e.role=role();log.unshift(e);render()}
+
+function propose(text){
+ chat(text,"u");
+ var p=plan(text);
+ if(!p){chat("I could not map that to an available tool. Try a lookup, email, tag, delete or refund request.");addLog({prompt:text,tool:"none",outcome:"no_tool_selected",detail:"Planner found no matching tool"});pending=null;renderPlan();return}
+ p.prompt=text;pending=p;
+ var d=decision(p.tool);
+ chat("Plan: call "+p.tool+". Policy for "+role()+": "+d+".");
+ if(d==="auto"){execute("auto-allowed")}
+ else if(d==="deny"){addLog({prompt:text,tool:p.tool,args:p.args,risk:POLICY[p.tool].risk,outcome:"denied",detail:"Role "+role()+" lacks permission"});chat("Blocked: your role cannot perform this action.");pending=null}
+ renderPlan();
+}
+
+function execute(how){
+ var p=pending,d=decision(p.tool);
+ if(d==="deny"){addLog({prompt:p.prompt,tool:p.tool,args:p.args,risk:POLICY[p.tool].risk,outcome:"denied_at_execution",detail:"Permission revoked before execution"});chat("Blocked at execution: permissions changed.");pending=null;renderPlan();return}
+ try{var r=run(p);addLog({prompt:p.prompt,tool:p.tool,args:p.args,risk:POLICY[p.tool].risk,outcome:how,detail:r.res,undo:r.undo});chat("Done: "+r.res)}
+ catch(e){addLog({prompt:p.prompt,tool:p.tool,args:p.args,risk:POLICY[p.tool].risk,outcome:"failed",detail:"Error: "+e.message});chat("The action failed and was logged.")}
+ pending=null;renderPlan();
+}
+
+function reject(){addLog({prompt:pending.prompt,tool:pending.tool,args:pending.args,risk:POLICY[pending.tool].risk,outcome:"rejected_by_user",detail:"Approval declined"});chat("Rejected. Nothing was changed.");pending=null;renderPlan()}
+function undo(id){var e=log.filter(function(x){return x.id===id})[0];e.undo();e.undo=null;addLog({prompt:"(undo of #"+id+")",tool:e.tool,risk:e.risk,outcome:"undone",detail:"Reverted: "+e.detail});render()}
+
+function chat(t,w){var d=document.createElement("div");d.className="msg"+(w==="u"?" u":"");d.textContent=t;$("chat").appendChild(d);$("chat").scrollTop=1e9}
+
+function renderPlan(){
+ var p=pending;if(!p||decision(p.tool)!=="approve"){$("plan").innerHTML="";return}
+ $("plan").innerHTML='<div class="plan"><b>Approval required</b><div class="note">Risk class: '+POLICY[p.tool].risk+(POLICY[p.tool].undo?" | reversible":" | irreversible")+'</div><p>Tool <code>'+p.tool+'</code> with <code>'+esc(JSON.stringify(p.args))+'</code></p><div class="row"><button class="ok" id="ap">Approve</button><button class="bad" id="rj">Reject</button></div></div>';
+ $("ap").onclick=function(){execute("approved_by_user")};$("rj").onclick=reject;
+}
+
+function render(){
+ $("log").innerHTML=log.length?log.map(function(e){
+  return '<div class="log"><b>#'+e.id+'</b> '+e.time+' | '+e.role+' | <code>'+e.tool+'</code> '+(e.risk?'<span class="tag">'+e.risk+'</span>':'')+'<br><span class="'+(/denied|rejected|failed/.test(e.outcome)?'deny':e.outcome==="undone"?'approve':'auto')+'">'+e.outcome+'</span>: '+esc(e.detail)+'<br><span class="note">Prompt: '+esc(e.prompt)+(e.args?' | Inputs: '+esc(JSON.stringify(e.args)):'')+'</span>'+(e.undo?' <button class="ghost" data-u="'+e.id+'">Undo</button>':'')+'</div>'
+ }).join(""):'<span class="note">No actions yet. Every attempt, including denials, is recorded here.</span>';
+ Array.prototype.forEach.call(document.querySelectorAll("[data-u]"),function(b){b.onclick=function(){undo(+b.getAttribute("data-u"))}});
+ $("data").innerHTML="<tr><th>Name</th><th>Email</th><th>Tags</th></tr>"+contacts.map(function(c){return"<tr><td>"+esc(c.name)+"</td><td>"+esc(c.email)+"</td><td>"+esc(c.tags.join(", "))+"</td></tr>"}).join("");
+}
+
+function matrix(){
+ var cls={auto:"auto",approve:"approve",deny:"deny"};
+ $("matrix").innerHTML="<tr><th>Tool</th><th>Risk</th><th>Admin</th><th>Manager</th><th>Agent</th></tr>"+Object.keys(POLICY).map(function(k){var p=POLICY[k];return"<tr><td><code>"+k+"</code></td><td>"+p.risk+"</td>"+["admin","manager","agent"].map(function(r){return'<td class="'+cls[p[r]]+'">'+p[r]+"</td>"}).join("")+"</tr>"}).join("");
+}
+
+var samples=["Look up Aisha","Email Priya a renewal reminder","Tag all contacts as q4-campaign","Delete Tom Becker","Refund Marco $250"];
+$("chips").innerHTML=samples.map(function(s,i){return'<button class="ghost" data-s="'+i+'">'+s+"</button>"}).join("");
+Array.prototype.forEach.call(document.querySelectorAll("[data-s]"),function(b){b.onclick=function(){propose(samples[+b.getAttribute("data-s")])}});
+$("go").onclick=function(){var v=$("q").value.trim();if(v){$("q").value="";propose(v)}};
+$("q").onkeydown=function(e){if(e.key==="Enter")$("go").click()};
+$("role").onchange=function(){$("rolenote").textContent="Role changed. Pending approvals are re-checked on execution.";renderPlan()};
+matrix();render();
+</script>
+</body>
+</html>
